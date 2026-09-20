@@ -36,6 +36,8 @@ export class ImageItem extends BaseDrawItem {
   borderRadius: number;
   private img: HTMLImageElement | null = null;
   private loaded = false;
+  /** 由 fetch+blob 路径创建的 Blob URL；加载完成后需调用 revokeObjectURL 释放 */
+  private _createdBlobUrl: string | null = null;
 
   constructor(opts: ImageOptions & { x?: number | string; y?: number | string; width?: number | string; height?: number | string; anchorX?: number | string; anchorY?: number | string; anchorXMode?: 'pixel' | 'percent'; anchorYMode?: 'pixel' | 'percent' }) {
     super();
@@ -62,10 +64,20 @@ export class ImageItem extends BaseDrawItem {
     this.img.onload = () => {
       this.loaded = true;
       pendingImages.delete(this.src);
+      // 释放 fetch 路径创建的 Blob URL（图片已解码到内部位图，URL 不再需要）
+      if (this._createdBlobUrl) {
+        URL.revokeObjectURL(this._createdBlobUrl);
+        this._createdBlobUrl = null;
+      }
       window.dispatchEvent(new CustomEvent('image-loaded', { detail: { src: this.src } }));
     };
     this.img.onerror = () => {
       pendingImages.delete(this.src);
+      // 出错时也释放 Blob URL
+      if (this._createdBlobUrl) {
+        URL.revokeObjectURL(this._createdBlobUrl);
+        this._createdBlobUrl = null;
+      }
       console.warn('Failed to load image:', this.src);
     };
 
@@ -90,7 +102,9 @@ export class ImageItem extends BaseDrawItem {
       const r = await fetch(this.src);
       if (r.ok) {
         const blob = await r.blob();
-        this.img!.src = URL.createObjectURL(blob);
+        const blobUrl = URL.createObjectURL(blob);
+        this._createdBlobUrl = blobUrl;
+        this.img!.src = blobUrl;
         return;
       }
     } catch {
