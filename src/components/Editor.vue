@@ -3,7 +3,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import loader from '@monaco-editor/loader'
 import { userApiDeclaration } from '../types/user-api-declaration'
 
@@ -16,12 +16,13 @@ const emit = defineEmits(['update:modelValue'])
 
 const containerRef = ref<HTMLDivElement>()
 let editor: any = null
+let monaco: any = null
 
 onMounted(async () => {
-  const monaco = await loader.init()
+  monaco = await loader.init()
   if (!containerRef.value) return
 
-  // ---------- 创建编辑器 ----------
+  // ---------- 创建编辑器（单 model：切换 tab 通过 setValue 更换内容，不保留撤销历史） ----------
   editor = monaco.editor.create(containerRef.value, {
     value: props.modelValue,
     language: props.language || 'javascript',
@@ -30,8 +31,8 @@ onMounted(async () => {
     minimap: { enabled: false },
     fontSize: 14,
     tabSize: 2,
-    lineNumbers: 'on',           // 显示行号
-    folding: true,               // 代码折叠（Monaco 内置，点击行号旁的折叠标记收缩/展开代码块）
+    lineNumbers: 'on',
+    folding: true,
     showFoldingControls: 'mouseover',
     lineDecorationsWidth: 0,
     renderLineHighlight: 'none',
@@ -55,20 +56,25 @@ onMounted(async () => {
   }
 
   // ---------- 窗口大小自适应 ----------
-  window.addEventListener('resize', () => {
-    editor?.layout()
-  })
+  window.addEventListener('resize', onResize)
 })
 
-// 外部值变化时更新编辑器
-watch(
-  () => props.modelValue,
-  (newVal) => {
-    if (editor && editor.getValue() !== newVal) {
-      editor.setValue(newVal)
-    }
+function onResize() {
+  editor?.layout()
+}
+
+// 外部值变化（切换 tab、导入文件覆盖等）：setValue 更新内容
+watch(() => props.modelValue, (newVal) => {
+  if (!editor) return
+  if (editor.getValue() !== newVal) {
+    editor.setValue(newVal)
   }
-)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onResize)
+  editor?.dispose()
+})
 </script>
 
 <style scoped>

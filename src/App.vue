@@ -8,6 +8,19 @@
           <span>自动渲染</span>
         </label>
       </div>
+      <div class="header-center">
+        <input
+          class="project-title-input"
+          :value="titleDraft"
+          spellcheck="false"
+          title="项目标题（失焦或回车确认，用于导出文件名）"
+          @input="titleDraft = ($event.target as HTMLInputElement).value"
+          @focus="titleFocused = true"
+          @blur="commitProjectTitle"
+          @keydown.enter="($event.target as HTMLInputElement).blur()"
+        />
+      </div>
+      <div class="header-right"></div>
     </div>
     <div class="main" ref="mainRef">
       <!-- 左侧面板：选项卡切换 -->
@@ -53,6 +66,16 @@
                   >×</button>
                 </span>
                 <button class="tab-add" title="新建代码选项卡" @click="addCodeTab">+</button>
+                <button class="tab-io" title="导出全部代码选项卡为 .js 文件" @click="exportAllJs">⬇</button>
+                <button class="tab-io" title="导入 .js 文件（文件名作为选项卡名，可多选）" @click="importJsInputRef?.click()">⬆</button>
+                <input
+                  ref="importJsInputRef"
+                  type="file"
+                  accept=".js,text/javascript"
+                  multiple
+                  style="display: none"
+                  @change="importJsFiles"
+                />
               </div>
               <div class="code-tabs-hint">拖拽排序 · main 固定不可移动 · 双击重命名</div>
             </div>
@@ -169,6 +192,42 @@ function serializeCodeTabs(tabs: CodeTab[]): string {
 const codeTabs = ref<CodeTab[]>(parseCodeTabs(user_script_base64))
 const activeCodeTab = ref(0)
 
+// ===================== 项目标题（存储在 UI 参数中，随导出 HTML 持久化） =====================
+const PROJECT_TITLE_KEY = '__projectTitle__'
+const DEFAULT_PROJECT_TITLE = 'main'
+const projectTitle = computed({
+  get: () => {
+    const v = UIManager.store[PROJECT_TITLE_KEY]
+    return typeof v === 'string' && v.trim() ? v : DEFAULT_PROJECT_TITLE
+  },
+  set: (v: string) => { UIManager.store[PROJECT_TITLE_KEY] = v },
+})
+
+// 标题编辑采用草稿模式：输入过程只写本地草稿，失焦（或回车触发失焦）时才确认写入存储
+const titleDraft = ref(projectTitle.value)
+const titleFocused = ref(false)
+// 未聚焦时若存储值被外部改变（如重置默认值、反序列化），同步草稿
+watch(() => projectTitle.value, (v) => {
+  if (!titleFocused.value) titleDraft.value = v
+})
+function commitProjectTitle() {
+  titleFocused.value = false
+  // 直接去除文件名非法字符（\ / : * ? " < > |），再 trim
+  const cleaned = titleDraft.value.replace(/[\\/:*?"<>|]/g, '').trim()
+  // 空标题回退默认值 main
+  projectTitle.value = cleaned || DEFAULT_PROJECT_TITLE
+  titleDraft.value = projectTitle.value
+}
+
+/** 文件名安全兜底：直接去除非法字符（Windows: \ / : * ? " < > |）与首尾空格/点 */
+function safeProjectName(): string {
+  const name = (projectTitle.value || DEFAULT_PROJECT_TITLE)
+    .replace(/[\\/:*?"<>|]/g, '')
+    .trim()
+    .replace(/^\.+|\.+$/g, '')
+  return name || DEFAULT_PROJECT_TITLE
+}
+
 const script = computed(() => codeTabs.value[activeCodeTab.value]?.content ?? '')
 // 双向：编辑器修改时写回当前选项卡
 function updateActiveCode(val: string) {
@@ -189,8 +248,51 @@ const activeTab = ref<'code' | 'params'>('code')
 // ===================== 代码选项卡管理 =====================
 const renamingCodeIdx = ref<number | null>(null)
 const renameInputRef = ref<HTMLInputElement>()
+const importJsInputRef = ref<HTMLInputElement>()
 const dragOverIdx = ref<number>(-1)
 let dragSrcIdx = -1
+
+/** 导出全部代码选项卡：每个选项卡一个 .js 文件，文件名为选项卡名 */
+function exportAllJs() {
+  const tabs = codeTabs.value
+  if (!tabs.length) return
+  // 逐个触发下载（小延迟避免浏览器拦截多文件下载）
+  tabs.forEach((tab, i) => {
+    setTimeout(() => {
+      const blob = new Blob([tab.content], { type: 'text/javascript;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${tab.name || `tab${i + 1}`}.js`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    }, i * 150)
+  })
+  status.value = `已导出 ${tabs.length} 个 .js 文件`
+}
+
+/** 导入 .js 文件：文件名（去扩展名）作为选项卡名；同名选项卡内容被覆盖，main.js 覆盖 main */
+async function importJsFiles(e: Event) {
+  const input = e.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  if (!files.length) return
+  let imported = 0
+  for (const file of files) {
+    const name = file.name.replace(/\.js$/i, '') || `tab${codeTabs.value.length + 1}`
+    const content = await file.text()
+    const existing = codeTabs.value.findIndex(t => t.name === name)
+    if (existing >= 0) {
+      codeTabs.value[existing].content = content
+    } else {
+      codeTabs.value.push({ name, content })
+    }
+    imported++
+  }
+  input.value = '' // 允许重复导入同一文件
+  status.value = `已导入 ${imported} 个 .js 文件`
+}
 
 function addCodeTab() {
   let i = 1
@@ -201,6 +303,8 @@ function addCodeTab() {
 
 function removeCodeTab(idx: number) {
   if (idx <= 0 || idx >= codeTabs.value.length) return
+  const tab = codeTabs.value[idx]
+  if (!confirm(`确定删除代码选项卡「${tab.name}」吗？此操作不可撤销。`)) return
   codeTabs.value.splice(idx, 1)
   if (activeCodeTab.value >= codeTabs.value.length) {
     activeCodeTab.value = codeTabs.value.length - 1
@@ -221,7 +325,10 @@ function commitRenameCodeTab(e: Event) {
   if (idx == null) return
   const newName = (e.target as HTMLInputElement).value.trim()
   if (newName && !codeTabs.value.some((t, i) => i !== idx && t.name === newName)) {
-    codeTabs.value[idx].name = newName
+    const oldName = codeTabs.value[idx].name
+    if (oldName !== newName) {
+      codeTabs.value[idx].name = newName
+    }
   }
   renamingCodeIdx.value = null
 }
@@ -962,7 +1069,7 @@ async function downloadPNG() {
     const dataUrl = previewRef.value?.getDataURL()
     if (dataUrl) {
       const link = document.createElement('a')
-      link.download = 'card_back_pattern.png'
+      link.download = `${safeProjectName()}.png`
       link.href = dataUrl
       link.click()
     }
@@ -1006,9 +1113,10 @@ async function exportAllPages() {
     return
   }
   status.value = `⏳ 正在导出 ${urls.length} 张图片...`
+  const baseName = safeProjectName()
   for (let i = 0; i < urls.length; i++) {
     const link = document.createElement('a')
-    link.download = `page_${i+1}.png`
+    link.download = `${baseName}_${i+1}.png`
     link.href = urls[i]
     link.click()
     await new Promise(r => setTimeout(r, 100)) // 避免浏览器拦截
@@ -1032,7 +1140,7 @@ function exportHTML() {
   // 6. 下载
   const blob = new Blob([template], { type: 'text/html;charset=utf-8' });
   const link = document.createElement('a');
-  link.download = 'index.html';
+  link.download = `${safeProjectName()}.html`;
   link.href = URL.createObjectURL(blob);
   link.click();
   URL.revokeObjectURL(link.href);
@@ -1089,6 +1197,44 @@ body {
   align-items: center;
   margin-bottom: 12px;
   flex-shrink: 0;
+}
+
+.header-left,
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+}
+
+.header-right {
+  justify-content: flex-end;
+}
+
+.header-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.project-title-input {
+  width: 220px;
+  padding: 5px 12px;
+  font-size: 15px;
+  font-weight: 600;
+  text-align: center;
+  color: #2c3e50;
+  background: #fff;
+  border: 1px solid #d4b87a;
+  border-radius: 6px;
+  outline: none;
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+
+.project-title-input:focus {
+  border-color: #b8935a;
+  box-shadow: 0 0 0 2px rgba(212, 184, 122, 0.25);
 }
 
 .header h1 {
@@ -1298,6 +1444,26 @@ body {
 }
 
 .tab-add:hover {
+  background: #0e639c;
+  color: #fff;
+  border-color: #1177bb;
+}
+
+.tab-io {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: #888;
+  background: #2d2d2d;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.tab-io:hover {
   background: #0e639c;
   color: #fff;
   border-color: #1177bb;

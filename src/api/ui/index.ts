@@ -79,9 +79,13 @@ export const UIManager = {
     }
   },
 
-  /** 重置全部：清空持久化值（所有控件恢复为代码中定义的默认值）并清空布局树 */
+  /** 重置全部：清空持久化值（所有控件恢复为代码中定义的默认值）并清空布局树。
+   *  注意：项目标题 __projectTitle__ 由用户在顶部输入框编辑，不属于代码定义的控件，
+   *  重置时保留，避免用户误点重置丢失标题。 */
   resetAll() {
+    const savedTitle = store['__projectTitle__']
     this.clearStore()
+    if (savedTitle !== undefined) store['__projectTitle__'] = savedTitle
     for (const tab of uiTabs) {
       tab.children.splice(0, tab.children.length)
     }
